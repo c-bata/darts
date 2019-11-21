@@ -91,7 +91,7 @@ class Architect:
             if v.grad is None:
                 v.grad = g
             else:
-                v.grad.data.copy_(g.data)
+                v.grad.copy_(g)
 
     def _construct_model_from_theta(self, theta):
         model_new = self.model.new()
