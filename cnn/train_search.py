@@ -13,7 +13,6 @@ import torch.nn.functional as F
 import torchvision.datasets as dset
 import torch.backends.cudnn as cudnn
 
-from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
 
@@ -89,25 +88,20 @@ logging.getLogger().addHandler(fh)
 
 CIFAR_CLASSES = 10
 
+device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
+
 
 def main():
-    if not torch.cuda.is_available():
-        logging.info("no gpu device available")
-        sys.exit(1)
-
     np.random.seed(args.seed)
-    torch.cuda.set_device(args.gpu)
     cudnn.benchmark = True
     torch.manual_seed(args.seed)
     cudnn.enabled = True
     torch.cuda.manual_seed(args.seed)
-    logging.info("gpu device = %d" % args.gpu)
+    logging.info("device = %s" % 'cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
     logging.info("args = %s", args)
 
-    criterion = nn.CrossEntropyLoss()
-    criterion = criterion.cuda()
-    model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion)
-    model = model.cuda()
+    criterion = nn.CrossEntropyLoss().to(device)
+    model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion).to(device)
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
     optimizer = torch.optim.SGD(
@@ -177,20 +171,24 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
     top1 = utils.AvgrageMeter()
     top5 = utils.AvgrageMeter()
 
-    for step, (input, target) in enumerate(train_queue):
+    for step, (input_tensor, target) in enumerate(train_queue):
         model.train()
-        n = input.size(0)
+        n = input_tensor.size(0)
 
-        input = Variable(input, requires_grad=False).cuda()
-        target = Variable(target, requires_grad=False).cuda(async=True)
+        input_tensor = input_tensor.to(device)  # type: torch.Tensor
+        input_tensor.requires_grad = False
+        target = target.to(device)  # type: torch.Tensor
+        target.requires_grad = False
 
         # get a random minibatch from the search queue with replacement
         input_search, target_search = next(iter(valid_queue))
-        input_search = Variable(input_search, requires_grad=False).cuda()
-        target_search = Variable(target_search, requires_grad=False).cuda(async=True)
+        input_search = input_search.to(device)  # type: torch.Tensor
+        input_search.requires_grad = False
+        target_search = target_search.to(device)  # type: torch.Tensor
+        target_search.requires_grad = False
 
         architect.step(
-            input,
+            input_tensor,
             target,
             input_search,
             target_search,
@@ -200,17 +198,17 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
         )
 
         optimizer.zero_grad()
-        logits = model(input)
+        logits = model(input_tensor)
         loss = criterion(logits, target)
 
         loss.backward()
-        nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
 
         if step % args.report_freq == 0:
             logging.info("train %03d %e %f %f", step, objs.avg, top1.avg, top5.avg)
@@ -224,21 +222,22 @@ def infer(valid_queue, model, criterion):
     top5 = utils.AvgrageMeter()
     model.eval()
 
-    for step, (input, target) in enumerate(valid_queue):
-        input = Variable(input, volatile=True).cuda()
-        target = Variable(target, volatile=True).cuda(async=True)
+    with torch.no_grad():
+        for step, (input_tensor, target) in enumerate(valid_queue):
+            input_tensor = input_tensor.to(device)
+            target = target.to(device)
 
-        logits = model(input)
-        loss = criterion(logits, target)
+            logits = model(input_tensor)
+            loss = criterion(logits, target)
 
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        n = input.size(0)
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+            n = input_tensor.size(0)
+            objs.update(loss.item(), n)
+            top1.update(prec1.item(), n)
+            top5.update(prec5.item(), n)
 
-        if step % args.report_freq == 0:
-            logging.info("valid %03d %e %f %f", step, objs.avg, top1.avg, top5.avg)
+            if step % args.report_freq == 0:
+                logging.info("valid %03d %e %f %f", step, objs.avg, top1.avg, top5.avg)
 
     return top1.avg, objs.avg
 

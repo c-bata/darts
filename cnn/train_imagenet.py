@@ -13,7 +13,6 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torch.backends.cudnn as cudnn
 
-from torch.autograd import Variable
 from model import NetworkImageNet as Network
 
 
@@ -78,6 +77,8 @@ logging.getLogger().addHandler(fh)
 
 CLASSES = 1000
 
+device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
+
 
 class CrossEntropyLabelSmooth(nn.Module):
     def __init__(self, num_classes, epsilon):
@@ -95,32 +96,25 @@ class CrossEntropyLabelSmooth(nn.Module):
 
 
 def main():
-    if not torch.cuda.is_available():
-        logging.info("no gpu device available")
-        sys.exit(1)
-
     np.random.seed(args.seed)
-    torch.cuda.set_device(args.gpu)
     cudnn.benchmark = True
     torch.manual_seed(args.seed)
     cudnn.enabled = True
     torch.cuda.manual_seed(args.seed)
-    logging.info("gpu device = %d" % args.gpu)
+    logging.info("device = %s" % 'cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
     logging.info("args = %s", args)
 
     genotype = eval("genotypes.%s" % args.arch)
     model = Network(args.init_channels, CLASSES, args.layers, args.auxiliary, genotype)
     if args.parallel:
-        model = nn.DataParallel(model).cuda()
+        model = nn.DataParallel(model).to(device)
     else:
-        model = model.cuda()
+        model = model.to(device)
 
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
-    criterion = nn.CrossEntropyLoss()
-    criterion = criterion.cuda()
-    criterion_smooth = CrossEntropyLabelSmooth(CLASSES, args.label_smooth)
-    criterion_smooth = criterion_smooth.cuda()
+    criterion = nn.CrossEntropyLoss().to(device)
+    criterion_smooth = CrossEntropyLabelSmooth(CLASSES, args.label_smooth).to(device)
 
     optimizer = torch.optim.SGD(
         model.parameters(),
@@ -216,28 +210,26 @@ def train(train_queue, model, criterion, optimizer):
     top5 = utils.AvgrageMeter()
     model.train()
 
-    for step, (input, target) in enumerate(train_queue):
-        target = target.cuda(async=True)
-        input = input.cuda()
-        input = Variable(input)
-        target = Variable(target)
+    for step, (input_tensor, target) in enumerate(train_queue):
+        input_tensor = input_tensor.to(device)
+        target = target.to(device)
 
         optimizer.zero_grad()
-        logits, logits_aux = model(input)
+        logits, logits_aux = model(input_tensor)
         loss = criterion(logits, target)
         if args.auxiliary:
             loss_aux = criterion(logits_aux, target)
             loss += args.auxiliary_weight * loss_aux
 
         loss.backward()
-        nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        n = input.size(0)
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+        n = input_tensor.size(0)
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
 
         if step % args.report_freq == 0:
             logging.info("train %03d %e %f %f", step, objs.avg, top1.avg, top5.avg)
@@ -251,21 +243,22 @@ def infer(valid_queue, model, criterion):
     top5 = utils.AvgrageMeter()
     model.eval()
 
-    for step, (input, target) in enumerate(valid_queue):
-        input = Variable(input, volatile=True).cuda()
-        target = Variable(target, volatile=True).cuda(async=True)
+    with torch.no_grad():
+        for step, (input_tensor, target) in enumerate(valid_queue):
+            input_tensor = input_tensor.to(device)
+            target = target.to(device)
 
-        logits, _ = model(input)
-        loss = criterion(logits, target)
+            logits, _ = model(input_tensor)
+            loss = criterion(logits, target)
 
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        n = input.size(0)
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+            n = input_tensor.size(0)
+            objs.update(loss.item(), n)
+            top1.update(prec1.item(), n)
+            top5.update(prec5.item(), n)
 
-        if step % args.report_freq == 0:
-            logging.info("valid %03d %e %f %f", step, objs.avg, top1.avg, top5.avg)
+            if step % args.report_freq == 0:
+                logging.info("valid %03d %e %f %f", step, objs.avg, top1.avg, top5.avg)
 
     return top1.avg, top5.avg, objs.avg
 
