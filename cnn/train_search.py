@@ -111,7 +111,10 @@ def main():
         weight_decay=args.weight_decay,
     )
 
-    train_transform, valid_transform = utils._data_transforms_cifar10(args)
+    cutout = None
+    if args.cutout:
+        cutout = args.cutout_length
+    train_transform, valid_transform = utils._data_transforms_cifar10(cutout)
     train_data = dset.CIFAR10(
         root=args.data, train=True, download=True, transform=train_transform
     )
@@ -120,7 +123,7 @@ def main():
     indices = list(range(num_train))
     split = int(np.floor(args.train_portion * num_train))
 
-    train_queue = torch.utils.data.DataLoader(
+    train_loader = torch.utils.data.DataLoader(
         train_data,
         batch_size=args.batch_size,
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
@@ -128,7 +131,7 @@ def main():
         num_workers=2,
     )
 
-    valid_queue = torch.utils.data.DataLoader(
+    valid_loader = torch.utils.data.DataLoader(
         train_data,
         batch_size=args.batch_size,
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
@@ -143,7 +146,6 @@ def main():
     architect = Architect(model, args)
 
     for epoch in range(args.epochs):
-        scheduler.step()
         lr = scheduler.get_lr()[0]
         logging.info("epoch %d lr %e", epoch, lr)
 
@@ -155,14 +157,15 @@ def main():
 
         # training
         train_acc, train_obj = train(
-            train_queue, valid_queue, model, architect, criterion, optimizer, lr
+            train_loader, valid_loader, model, architect, criterion, optimizer, lr
         )
         logging.info("train_acc %f", train_acc)
 
         # validation
-        valid_acc, valid_obj = infer(valid_queue, model, criterion)
+        valid_acc, valid_obj = infer(valid_loader, model, criterion)
         logging.info("valid_acc %f", valid_acc)
 
+        scheduler.step()
         utils.save(model, os.path.join(args.save, "weights.pt"))
 
 
