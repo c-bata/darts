@@ -48,6 +48,14 @@ class Architect(object):
         network_optimizer,
         unrolled,
     ):
+        """
+        epochをすすめるたびにこのstepメソッドが呼ばれる。
+
+        unrolledを指定したときはarchitectureの選択確率を更新しない。
+        つまりcontinuous relaxationが本当に意味のある空間を探索してるのかを
+        確認するためだけなので基本的にはこれが True になる分岐だけチェックすればいい。
+        """
+
         self.optimizer.zero_grad()
         if unrolled:
             self._backward_step_unrolled(
