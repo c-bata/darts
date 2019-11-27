@@ -111,7 +111,7 @@ class Identity(nn.Module):
 
 
 class Zero(nn.Module):
-    """ノード同士を繋がないという操作"""
+    """ノード同士を繋がないという操作. genotypes.PRIMITIVESのnoneはこれに該当"""
     def __init__(self, stride):
         super(Zero, self).__init__()
         self.stride = stride

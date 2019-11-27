@@ -9,6 +9,15 @@ from genotypes import Genotype
 
 class MixedOp(nn.Module):
     _ops: nn.ModuleList
+    # 各エッジがとりうるoperationは genotypes.PRIMITIVES に定義されている8つが存在
+    # 1. "none",
+    # 2. "max_pool_3x3",
+    # 3. "avg_pool_3x3",
+    # 4. "skip_connect",
+    # 5. "sep_conv_3x3",
+    # 6. "sep_conv_5x5",
+    # 7. "dil_conv_3x3",
+    # 8. "dil_conv_5x5",
 
     def __init__(self, C: int, stride: int):
         super().__init__()
@@ -23,32 +32,33 @@ class MixedOp(nn.Module):
             self._ops.append(op)
 
     def forward(self, x, weights):
-        # 雰囲気的には、各operationの選択確率がweightsとして渡されるから、
-        # それをcontinuous domain(連続値の空間)に落とし込んでいるようにみえる。
-        # TODO(c-bata): nn.Module と weight の積が何を意味するか確認
+        # DARTSの論文の式(2)にあたる。ただweightsじたいは別のところでalphaのsoftmaxとってる。
+
         s = sum(w * op(x) for w, op in zip(weights, self._ops))
         # p weights[0]: [torch.cuda.FloatTensor of size 1 (GPU 0)]
-        """ weights は最初こんな感じ
-        (Pdb) p weights
-        Variable containing:
-         0.1249
-         0.1252
-         0.1250
-         0.1249
-         0.1250
-         0.1250
-         0.1250
-         0.1251
-        [torch.cuda.FloatTensor of size 8 (GPU 0)]
-        (pdb) p sum(weights)
-        Variable containing:
-         1
-        [torch.cuda.FloatTensor of size 1 (GPU 0)]
-        """
+        #
+        # 各operationの選択確率がweightsとして渡される。weights は最初こんな感じ。
+        # operationが8つあって、それぞれのweights(scalar)を持つ。
+        # (Pdb) p weights
+        # Variable containing:
+        #  0.1249
+        #  0.1252
+        #  0.1250
+        #  0.1249
+        #  0.1250
+        #  0.1250
+        #  0.1250
+        #  0.1251
+        # [torch.cuda.FloatTensor of size 8 (GPU 0)]
+        # (pdb) p sum(weights)
+        # Variable containing:
+        #  1
+        # [torch.cuda.FloatTensor of size 1 (GPU 0)]
 
         # x: torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
         # self._ops[0](x): [torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
         # s: [torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
+
         # weights は スカラーだから ops[0](x) の次元を変えない
         return s
 
@@ -108,15 +118,22 @@ class Cell(nn.Module):
 
 
 class Network(nn.Module):
+    _C: int
+    _num_classes: int
+    _layers: int
+    _criterion: nn.CrossEntropyLoss  # 実際は torch.nn.modules.loss._Loss がbase classっぽい
+    _steps: int
+    _multiplier: int
+
     def __init__(
-        self,
-        C,
-        num_classes,
-        layers,
-        criterion,  # criterion=基準. nn.CrossEntropyLoss() とかが渡されてくる.
-        steps=4,
-        multiplier=4,
-        stem_multiplier=3,  # Conv2d層で何倍に次元を増やすかを指定。多いほどおそらく表現力が上がるけど、学習が難しくなるんだと思う
+            self,
+            C: int,  # 入力の次元 (default: 16)
+            num_classes: int,  # 出力の次元 (今回は10次元)
+            layers: int,  # total number of layers (default=8)
+            criterion: nn.CrossEntropyLoss,  # criterion=基準. nn.CrossEntropyLoss() とかが渡されてくる.
+            steps: int = 4,
+            multiplier: int = 4,
+            stem_multiplier: int = 3,  # Conv2d層で何倍に次元を増やすかを指定。多いほどおそらく表現力が上がるけど、学習が難しくなるんだと思う
     ):
         super(Network, self).__init__()
         self._C = C
@@ -209,6 +226,10 @@ class Network(nn.Module):
         # s0: [torch.cuda.FloatTensor of size 64x48x32x32 (GPU 0)]
 
         for i, cell in enumerate(self.cells):
+            # 式(2)に該当。alphaのsoftmaxを取っているところ。
+            # 全cellで同じalphasを繰り返す。
+            # つまり2つの reduction cell は同じ構造
+            # それ以外の6つの normal cell も同じ構造を持つ
             if cell.reduction:
                 weights = F.softmax(self.alphas_reduce, dim=-1)
             else:
