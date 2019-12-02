@@ -172,12 +172,16 @@ def main():
         utils.save(model, os.path.join(args.save, "weights.pt"))
 
 
-def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
+def train(train_queue, valid_queue, model: 'Network', architect, criterion, optimizer, lr):
+    # 今は結局modelもarchitectも渡してる。
+    # modelだけ渡したら良いような気もしたけどepochまたいでarchitectは使いたくてこうなったんだな。
     objs = utils.AvgrageMeter()
     top1 = utils.AvgrageMeter()
     top5 = utils.AvgrageMeter()
 
     for step, (input, target) in enumerate(train_queue):
+        # modelを学習するモードに設定. 最新でも必要なのかよくわからない
+        # DropoutとかBatchNormに必要らしい
         model.train()
         n = input.size(0)
 

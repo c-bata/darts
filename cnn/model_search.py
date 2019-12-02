@@ -32,11 +32,12 @@ class MixedOp(nn.Module):
             self._ops.append(op)
 
     def forward(self, x, weights):
-        # DARTSの論文の式(2)にあたる。ただweightsじたいは別のところでalphaのsoftmaxとってる。
+        # DARTSの論文の式(2)にあたる。ただweights自体は別のところでalphaのsoftmaxとってる。
 
-        s = sum(w * op(x) for w, op in zip(weights, self._ops))
+        # weightsもself._ops も8個の配列.
+        # x: torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
         # p weights[0]: [torch.cuda.FloatTensor of size 1 (GPU 0)]
-        #
+
         # 各operationの選択確率がweightsとして渡される。weights は最初こんな感じ。
         # operationが8つあって、それぞれのweights(scalar)を持つ。
         # (Pdb) p weights
@@ -55,11 +56,14 @@ class MixedOp(nn.Module):
         #  1
         # [torch.cuda.FloatTensor of size 1 (GPU 0)]
 
-        # x: torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
+        s = sum(w * op(x) for w, op in zip(weights, self._ops))
+
         # self._ops[0](x): [torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
         # s: [torch.cuda.FloatTensor of size 64x16x32x32 (GPU 0)]
 
         # weights は スカラーだから ops[0](x) の次元を変えない
+        # operationの結果の出力にyを足して総和をとる。
+        # つまり、op(x) の出力はかならず同じ次元じゃないといけない。ほんとか？
         return s
 
 
@@ -67,7 +71,7 @@ class Cell(nn.Module):
     preprocess0: nn.Module
     preprocess1: nn.Module
     _steps: int
-    _multiplier: int
+    _multiplier: int  # nodeの後ろから何個を最終的な出力につなげるかを指定
     _ops: nn.ModuleList  # MixedOp がappendされていく。
     _bns: nn.ModuleList
 
@@ -100,20 +104,42 @@ class Cell(nn.Module):
                 op = MixedOp(C, stride)
                 self._ops.append(op)
 
-    def forward(self, s0, s1, weights):
+    def forward(self, s0, s1, weights):  # ここの理解は重要
+        # weights は選択確率(alphas_normal or alphas_reduce)に softmax をかけたもの.
+        # weights のsizeは 14(MixedOpの数) x 8(オペレーション数)
         s0 = self.preprocess0(s0)
         s1 = self.preprocess1(s1)
 
         states = [s0, s1]
         offset = 0
-        for i in range(self._steps):
+        for i in range(self._steps):  # _steps は2 inputsを除いたノード数 (default: 4). node数だけ繰り返す.
+            # node=4 に対して MixedOp が 14 (2 + 3 + 4 + 5) 個入ってる.
+
+            # nodeのinputのサイズとoutputのサイズは必ず一致させている (64 x 16 x 32 x 32)。
+            # だから以前のnodeのoutputの出力を1つずつ与えてその出力の合計値をここでは使ってる。これがまぁcontinuous relaxationっぽい。
             s = sum(
                 self._ops[offset + j](h, weights[offset + j])
-                for j, h in enumerate(states)
+                for j, h in enumerate(states)  # j: node番号(0-3), h:node番号に対応するMixedOp
             )
-            offset += len(states)
+            # i=0 (offset=0):
+            #   j = 0, h = s0: self._ops[0](s0, weights[0])
+            #   j = 1, h = s1: self._ops[1](s1, weights[1])
+            # i=1 (offset=2):
+            #   j = 0, h = s0: self._ops[2](s0, weights[2])
+            #   j = 1, h = s1: self._ops[3](s1, weights[3])
+            #   j = 2, h = s2: self._ops[4](s2, weights[4])
+            # i=3 (offset=5):
+            #   j = 0, h = s0: self._ops[5](s0, weights[5])
+            #   ...
+            #   j = 3, h = s2: self._ops[8](s3, weights[8])
+            # i=4 (offset=9):
+            #   j = 0, h = s0: self._ops[9](s0, weights[9])
+            #   ...
+            #   j = 4, h = s4: self._ops[13](s4, weights[13])
+            offset += len(states)  # 2, 3, 4, 5 と足されていく
             states.append(s)
 
+        # 最終的なcellの出力は、nodeの後ろから _multiplier 個だけ取り出して足し合わせる.
         return torch.cat(states[-self._multiplier :], dim=1)
 
 

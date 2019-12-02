@@ -1,7 +1,12 @@
 import torch
 import torch.nn as nn
 
-OPS = {
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import TYPE_CHECKING
+
+OPS: Dict[str, Callable[[int, int, bool], nn.Module]] = {
     "none": lambda C, stride, affine: Zero(stride),
     "avg_pool_3x3": lambda C, stride, affine: nn.AvgPool2d(
         3, stride=stride, padding=1, count_include_pad=False
@@ -26,6 +31,31 @@ OPS = {
         C, C, 5, stride, 4, 2, affine=affine
     ),
 }
+
+
+class AbstractOperation:
+    def get_nn_module(
+            self,
+            channel_in: int,
+            stride: int,
+            affine: bool,
+    ):
+        raise NotImplementedError()
+
+
+class ZeroOperation(nn.Module, AbstractOperation):
+    def __init__(self, stride):
+        super().__init__()
+        self.stride = stride
+
+    def get_nn_module(self, channel_in: int, stride: int, affine: bool):
+        # 微妙だな。functionで十分.
+        return ZeroOperation(stride)
+
+    def forward(self, x):
+        if self.stride == 1:
+            return x.mul(0.0)
+        return x[:, :, :: self.stride, :: self.stride].mul(0.0)
 
 
 class ReLUConvBN(nn.Module):
